@@ -284,6 +284,7 @@ struct ContentView: View {
             
             // get original gestalt values
             let mg_saved_dict = try NSMutableDictionary(contentsOf: mg_url_saved, error: ())
+            restorePersistentSelection(into: mg_dict_now, original: mg_saved_dict)
             let og_cache_extra = mg_saved_dict["CacheExtra"] as? NSMutableDictionary ?? NSMutableDictionary()
             let og_artwork = og_cache_extra["oPeik/9e8lQWMszEjbPzng"] as? NSMutableDictionary ?? NSMutableDictionary()
             
@@ -336,6 +337,11 @@ struct ContentView: View {
 
             let systemTweakErrors = applySystemTweaks()
             try mg_write(data)
+            if persistent_mode {
+                try data.write(to: persistentSelectionURL, options: .atomic)
+            } else {
+                try? FileManager.default.removeItem(at: persistentSelectionURL)
+            }
             enable_devicename = false
             mg_load()
 
@@ -372,6 +378,7 @@ struct ContentView: View {
             let backup_data = try Data(contentsOf: backup_url)
             try mg_write(backup_data)
             try restoreRDARFix()
+            try? FileManager.default.removeItem(at: persistentSelectionURL)
 
             persistent_mode = false
             rdar_fix_enabled = false
@@ -485,6 +492,15 @@ struct ContentView: View {
             }
         }
 
+        do {
+            try verifyRDARDirectoryChain()
+            try backupSystemFileIfNeeded(at: TweakPaths.graphics, named: backupName)
+            print("(rdar) acquired Managed Preferences through geod traversal")
+            return
+        } catch {
+            print("(rdar) geod directory route unavailable, falling back to CFPrefs: \(error)")
+        }
+
         // Never aim the creation primitive at the real preference until a
         // disposable file has passed creation, bad_query access, write,
         // read-back and deletion checks on this exact device.
@@ -499,6 +515,22 @@ struct ContentView: View {
             try grantSystemPathAccessWithRetries(TweakPaths.graphics)
         } catch {
             throw error
+        }
+    }
+
+    private func verifyRDARDirectoryChain() throws {
+        let directory = (TweakPaths.graphics as NSString).deletingLastPathComponent
+        try grantSystemDirectoryAccess(directory)
+
+        let probePath = directory + "/.mond-rdar-directory-probe-\(UUID().uuidString).plist"
+        defer { _ = Darwin.unlink(probePath) }
+        let marker = Data("mond-rdar-directory-probe".utf8)
+        try writeSystemData(marker, to: probePath)
+        guard try Data(contentsOf: URL(fileURLWithPath: probePath)) == marker else {
+            throw SystemPlistError.probeFailed("geod 目录测试文件回读不一致")
+        }
+        guard Darwin.unlink(probePath) == 0 else {
+            throw SystemPlistError.probeFailed("geod 目录测试文件无法删除（POSIX：\(errno)）")
         }
     }
 
@@ -541,6 +573,60 @@ struct ContentView: View {
             }
         }
         throw lastError
+    }
+
+    private var persistentSelectionURL: URL {
+        URL(fileURLWithPath: AppPaths.backups)
+            .appendingPathComponent("PersistentSelection.plist")
+    }
+
+    private func restorePersistentSelection(
+        into current: NSMutableDictionary,
+        original: NSDictionary
+    ) {
+        guard persistent_mode,
+              let data = try? Data(contentsOf: persistentSelectionURL),
+              let object = try? PropertyListSerialization.propertyList(
+                from: data, options: [.mutableContainersAndLeaves], format: nil
+              ),
+              let desired = object as? NSDictionary else {
+            return
+        }
+
+        let currentExtra = current["CacheExtra"] as? NSMutableDictionary
+            ?? NSMutableDictionary()
+        let desiredExtra = desired["CacheExtra"] as? NSDictionary
+            ?? NSDictionary()
+        let originalExtra = original["CacheExtra"] as? NSDictionary
+            ?? NSDictionary()
+        let keys = Set(desiredExtra.allKeys.compactMap { $0 as? String })
+            .union(originalExtra.allKeys.compactMap { $0 as? String })
+
+        for key in keys where !plistValuesEqual(desiredExtra[key], originalExtra[key]) {
+            if let value = desiredExtra[key] {
+                currentExtra[key] = value
+            } else {
+                currentExtra.removeObject(forKey: key)
+            }
+        }
+        current["CacheExtra"] = currentExtra
+
+        if !plistValuesEqual(desired["CacheData"], original["CacheData"]),
+           let desiredCacheData = desired["CacheData"] {
+            current["CacheData"] = desiredCacheData
+        }
+    }
+
+    private func plistValuesEqual(_ lhs: Any?, _ rhs: Any?) -> Bool {
+        switch (lhs, rhs) {
+        case (nil, nil):
+            return true
+        case let (left?, right?):
+            return NSDictionary(object: left, forKey: "value" as NSString)
+                .isEqual(to: ["value": right])
+        default:
+            return false
+        }
     }
 
     private func restoreRDARFix() throws {

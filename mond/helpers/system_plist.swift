@@ -31,6 +31,19 @@ enum SystemPlistError: Error, LocalizedError {
 private var systemPlistSandboxHandles: [Int64] = []
 
 @discardableResult
+func grantSystemDirectoryAccess(_ path: String) throws -> Int64 {
+    var pathCString = path.utf8CString
+    let handle = pathCString.withUnsafeMutableBufferPointer { buffer in
+        bad_query_geod_directory(buffer.baseAddress)
+    }
+    guard handle >= 0 else {
+        throw SystemPlistError.accessDenied(path: path, code: handle)
+    }
+    systemPlistSandboxHandles.append(handle)
+    return handle
+}
+
+@discardableResult
 func grantSystemPathAccess(_ path: String, createIfMissing: Bool = false) throws -> Int64 {
     let exists = FileManager.default.fileExists(atPath: path)
     var pathCString = path.utf8CString
