@@ -15,6 +15,7 @@ struct ContentView: View {
     @AppStorage("token") private var token: String = ""
     @AppStorage("rdar_fix_enabled") private var rdar_fix_enabled: Bool = false
     @AppStorage("rdar_fix_applied") private var rdar_fix_applied: Bool = false
+    @AppStorage("persistent_mode") private var persistent_mode: Bool = false
     
     @State private var mg_dict_now: NSMutableDictionary = NSMutableDictionary()
     @State private var is_valid: Bool = false
@@ -76,6 +77,12 @@ struct ContentView: View {
                     }
                 } footer: {
                     Text("**警告：** 错误使用这些修改可能导致设备功能异常，甚至无法正常启动！")
+                }
+
+                Section {
+                    Toggle("持久化模式", isOn: $persistent_mode)
+                } footer: {
+                    Text("保存已应用的 MobileGestalt 配置；设备重启后打开 mond 时会自动校验并恢复，无需再次点击“应用修改”。普通侧载 App 无法在尚未启动时随系统开机运行。")
                 }
                 
                 Section {
@@ -230,7 +237,13 @@ struct ContentView: View {
                     state.exploit_succeeded = true
                 }
                 
+                restorePersistentGestaltIfNeeded()
                 mg_load()
+            }
+            .onChange(of: persistent_mode) { _, enabled in
+                if !enabled {
+                    try? FileManager.default.removeItem(at: persistentGestaltURL)
+                }
             }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -329,6 +342,11 @@ struct ContentView: View {
 
             let systemTweakErrors = applySystemTweaks()
             try mg_write(data)
+            if persistent_mode {
+                try data.write(to: persistentGestaltURL, options: .atomic)
+            } else {
+                try? FileManager.default.removeItem(at: persistentGestaltURL)
+            }
             enable_devicename = false
             mg_load()
 
@@ -355,7 +373,9 @@ struct ContentView: View {
             let backup_data = try Data(contentsOf: backup_url)
             try mg_write(backup_data)
             try restoreRDARFix()
+            try? FileManager.default.removeItem(at: persistentGestaltURL)
 
+            persistent_mode = false
             rdar_fix_enabled = false
             rdar_fix_applied = false
 
@@ -509,16 +529,41 @@ struct ContentView: View {
 
     private func grantSystemPathAccessWithRetries(_ path: String) throws {
         var lastError: Error = SystemPlistError.probeFailed("等待文件创建超时")
-        for _ in 0..<15 {
+        for attempt in 0..<5 {
             do {
                 try grantSystemPathAccess(path, createIfMissing: false)
                 return
             } catch {
                 lastError = error
-                usleep(100_000)
+                // -254 means the race did not create the file. Submit another
+                // bounded attempt instead of repeatedly checking a missing path.
+                if attempt < 4, case SystemPlistError.accessDenied(_, -254) = error {
+                    _ = createMissingSystemFile(at: path)
+                }
             }
         }
         throw lastError
+    }
+
+    private var persistentGestaltURL: URL {
+        URL(fileURLWithPath: AppPaths.backups).appendingPathComponent("PersistentGestalt.plist")
+    }
+
+    private func restorePersistentGestaltIfNeeded() {
+        guard persistent_mode,
+              let desired = try? Data(contentsOf: persistentGestaltURL) else { return }
+        do {
+            let current = try Data(contentsOf: URL(fileURLWithPath: TweakPaths.gestalt))
+            guard current != desired else { return }
+            try mg_write(desired)
+            print("(persistent) restored saved MobileGestalt configuration")
+        } catch {
+            print("(persistent) failed to restore MobileGestalt: \(error)")
+            Alertinator.shared.alert(
+                title: "持久化恢复失败",
+                body: "\(error.localizedDescription)\n请确认文件访问权限后重试。"
+            )
+        }
     }
 
     private func restoreRDARFix() throws {
