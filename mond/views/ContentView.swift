@@ -13,8 +13,8 @@ struct ContentView: View {
     @EnvironmentObject var state: AppState
     @AppStorage("mg_devicename") private var mg_devicename: String = ""
     @AppStorage("token") private var token: String = ""
-    @AppStorage("rdar_fix_enabled") private var rdar_fix_enabled: Bool = false
-    @AppStorage("rdar_fix_applied") private var rdar_fix_applied: Bool = false
+    @AppStorage("dynamic_island_canvas_fix_enabled") private var canvas_fix_enabled: Bool = false
+    @AppStorage("dynamic_island_canvas_fix_applied") private var canvas_fix_applied: Bool = false
     @AppStorage("persistent_mode") private var persistent_mode: Bool = false
     
     @State private var mg_dict_now: NSMutableDictionary = NSMutableDictionary()
@@ -91,7 +91,7 @@ struct ContentView: View {
                         if is_device_good() {
                             Text("停用灵动岛").tag(2436)
                         }
-                        Text("iPhone 14 Pro").tag(2436)
+                        Text("iPhone 14 Pro").tag(2556)
                         Text("iPhone 14 Pro Max").tag(2796)
                         Text("iPhone 15 Pro Max").tag(2976)
                         if doubleSystemVersion() >= 18.0 {
@@ -117,15 +117,15 @@ struct ContentView: View {
                         TextField("设备名称", text: $mg_devicename)
                     }
 
-                    Toggle("灵动岛状态栏／RDAR 修复", isOn: $rdar_fix_enabled)
-                        .disabled(rdarFixMode == nil)
+                    Toggle("灵动岛画布／状态栏修复", isOn: $canvas_fix_enabled)
+                        .disabled(!canvasFixAvailable)
                 } header: {
                     Label("设备外观", systemImage: "paintbrush.pointed")
                 } footer: {
-                    if rdarFixMode == nil {
-                        Text("当前机型不需要或不支持 RDAR 分辨率修复。")
+                    if !canvasFixAvailable {
+                        Text("当前机型或所选子类型不支持画布修复。")
                     } else {
-                        Text("修复在非原生灵动岛机型上启用灵动岛后可能出现的状态栏错位。")
+                        Text("将显示画布调整为所选灵动岛机型的原生分辨率，使状态栏按对应布局重新排布。")
                     }
                 }
                 
@@ -237,6 +237,7 @@ struct ContentView: View {
                     state.exploit_succeeded = true
                 }
                 
+                migrateLegacyRDARPreference()
                 mg_load()
             }
             .toolbar {
@@ -377,12 +378,13 @@ struct ContentView: View {
             let backup_url = URL(fileURLWithPath: AppPaths.backups).appendingPathComponent("SavedGestalt.plist")
             let backup_data = try Data(contentsOf: backup_url)
             try mg_write(backup_data)
-            try restoreRDARFix()
+            try restoreLegacyRDARFixIfNeeded()
+            try restoreCanvasFix()
             try? FileManager.default.removeItem(at: persistentSelectionURL)
 
             persistent_mode = false
-            rdar_fix_enabled = false
-            rdar_fix_applied = false
+            canvas_fix_enabled = false
+            canvas_fix_applied = false
 
             print("(mg) successfully reverted mobilegestalt!)")
             Alertinator.shared.alert(title: "修改已成功还原！", body: "请重启设备以使还原生效。")
@@ -393,43 +395,25 @@ struct ContentView: View {
         }
     }
 
-    private enum RDARFixMode {
-        case legacyNotch
-        case modernNotch
-        case homeButton
+    private var canvasFixAvailable: Bool {
+        let supportedDevices = [
+            "iPhone11,2", "iPhone11,4", "iPhone11,6", "iPhone11,8",
+            "iPhone12,1", "iPhone12,3", "iPhone12,5", "iPhone12,8",
+            "iPhone13,2", "iPhone13,3", "iPhone13,4",
+            "iPhone14,2", "iPhone14,3", "iPhone14,5", "iPhone14,6",
+            "iPhone14,7", "iPhone14,8", "iPhone17,5"
+        ]
+        return supportedDevices.contains(machine_name()) && canvasSize(for: subtype) != nil
     }
 
-    private var rdarFixMode: RDARFixMode? {
-        switch machine_name() {
-        case "iPhone11,2", "iPhone11,4", "iPhone11,6", "iPhone11,8",
-             "iPhone12,1", "iPhone12,3", "iPhone12,5":
-            return .legacyNotch
-        case "iPhone13,2", "iPhone13,3", "iPhone13,4", "iPhone14,2",
-             "iPhone14,3", "iPhone14,5", "iPhone14,7", "iPhone14,8", "iPhone17,5":
-            return .modernNotch
-        case "iPhone12,8", "iPhone14,6":
-            return .homeButton
-        default:
-            return nil
-        }
-    }
-
-    private func rdarCanvasSize() -> (width: Int, height: Int)? {
-        guard let rdarFixMode else { return nil }
-        switch rdarFixMode {
-        case .legacyNotch:
-            return (828, 1791)
-        case .homeButton:
-            return (1000, 1779)
-        case .modernNotch:
-            switch subtype {
-            case 2556: return (1179, 2556)
-            case 2796: return (1290, 2796)
-            case 2622: return (1206, 2622)
-            case 2868: return (1320, 2868)
-            case 2736: return (1260, 2736)
-            default: return (2868, 1320)
-            }
+    private func canvasSize(for subtype: Int) -> (width: Int, height: Int)? {
+        switch subtype {
+        case 2556: return (1179, 2556)
+        case 2796, 2976: return (1290, 2796)
+        case 2622: return (1206, 2622)
+        case 2868: return (1320, 2868)
+        case 2736: return (1260, 2736)
+        default: return nil
         }
     }
 
@@ -437,142 +421,97 @@ struct ContentView: View {
         var errors: [String] = []
 
         do {
-            try applyRDARFix()
+            try restoreLegacyRDARFixIfNeeded()
         } catch {
-            errors.append("RDAR 修复：\(error.localizedDescription)")
-            print("(rdar) failed: \(error)")
+            errors.append("清理旧版状态栏修复：\(error.localizedDescription)")
+            print("(canvas) failed to restore legacy RDAR fix: \(error)")
+        }
+
+        do {
+            try applyCanvasFix()
+        } catch {
+            errors.append("灵动岛画布修复：\(error.localizedDescription)")
+            print("(canvas) failed: \(error)")
         }
 
         return errors
     }
 
-    private func applyRDARFix() throws {
-        let backupName = "IOMobileGraphicsFamily.plist"
-        guard rdar_fix_enabled || rdar_fix_applied else {
+    private func applyCanvasFix() throws {
+        let backupName = "Mobile-IOMobileGraphicsFamily.plist"
+        guard canvas_fix_enabled || canvas_fix_applied else {
             discardSystemBackup(named: backupName)
             return
         }
-        guard rdar_fix_enabled else {
-            try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: true)
-            _ = try restoreSystemFileIfBackedUp(at: TweakPaths.graphics, named: backupName)
-            rdar_fix_applied = false
-            return
-        }
-        guard let size = rdarCanvasSize() else {
-            rdar_fix_enabled = false
+        try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: true)
+
+        guard canvas_fix_enabled, canvasFixAvailable,
+              let size = canvasSize(for: subtype) else {
+            if canvas_fix_applied {
+                _ = try restoreSystemFileIfBackedUp(at: TweakPaths.graphics, named: backupName)
+            } else {
+                discardSystemBackup(named: backupName)
+            }
+            canvas_fix_enabled = false
+            canvas_fix_applied = false
             return
         }
 
-        try prepareRDARFileAccess(backupName: backupName)
+        try backupSystemFileIfNeeded(at: TweakPaths.graphics, named: backupName)
         let dictionary = try loadSystemPlist(at: TweakPaths.graphics)
         dictionary["canvas_width"] = size.width
         dictionary["canvas_height"] = size.height
-        try writeSystemPlist(dictionary, to: TweakPaths.graphics)
-        rdar_fix_applied = true
-        print("(rdar) applied canvas size \(size.width)x\(size.height)")
-    }
-
-    private func prepareRDARFileAccess(backupName: String) throws {
-        // A previous interrupted attempt may have created the target but not
-        // finished writing it. Keep the marker until we can safely remove that
-        // partial file; never silently treat it as an original system file.
-        if !rdar_fix_applied,
-           FileManager.default.fileExists(atPath: systemMissingMarkerURL(named: backupName).path) {
-            try grantSystemPathAccessWithRetries(TweakPaths.graphics)
-            try cleanupFailedSystemCreation(at: TweakPaths.graphics, named: backupName)
-        }
+        canvas_fix_applied = true
 
         do {
-            try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: false)
-            try backupSystemFileIfNeeded(at: TweakPaths.graphics, named: backupName)
-            return
-        } catch {
-            if FileManager.default.fileExists(atPath: TweakPaths.graphics) {
-                throw error
+            try writeSystemPlist(dictionary, to: TweakPaths.graphics)
+
+            let verification = try loadSystemPlist(at: TweakPaths.graphics)
+            guard verification["canvas_width"] as? Int == size.width,
+                  verification["canvas_height"] as? Int == size.height else {
+                throw SystemPlistError.writeFailed(path: TweakPaths.graphics, code: Int32(EIO))
             }
-        }
-
-        do {
-            try verifyRDARDirectoryChain()
-            try backupSystemFileIfNeeded(at: TweakPaths.graphics, named: backupName)
-            print("(rdar) acquired Managed Preferences through geod traversal")
-            return
         } catch {
-            print("(rdar) geod directory route unavailable, falling back to CFPrefs: \(error)")
-        }
-
-        // Never aim the creation primitive at the real preference until a
-        // disposable file has passed creation, bad_query access, write,
-        // read-back and deletion checks on this exact device.
-        try verifyRDARCreationChain()
-        try recordSystemFileOriginallyMissing(named: backupName)
-
-        guard createMissingSystemFile(at: TweakPaths.graphics) == 0 else {
-            discardSystemBackup(named: backupName)
-            throw SystemPlistError.probeFailed("无法提交目标文件创建请求")
-        }
-        do {
-            try grantSystemPathAccessWithRetries(TweakPaths.graphics)
-        } catch {
+            _ = try? restoreSystemFileIfBackedUp(at: TweakPaths.graphics, named: backupName)
+            canvas_fix_applied = false
             throw error
         }
+        print("(canvas) applied \(size.width)x\(size.height) to \(TweakPaths.graphics)")
     }
 
-    private func verifyRDARDirectoryChain() throws {
-        let directory = (TweakPaths.graphics as NSString).deletingLastPathComponent
-        try grantSystemDirectoryAccess(directory)
-
-        let probePath = directory + "/.mond-rdar-directory-probe-\(UUID().uuidString).plist"
-        defer { _ = Darwin.unlink(probePath) }
-        let marker = Data("mond-rdar-directory-probe".utf8)
-        try writeSystemData(marker, to: probePath)
-        guard try Data(contentsOf: URL(fileURLWithPath: probePath)) == marker else {
-            throw SystemPlistError.probeFailed("geod 目录测试文件回读不一致")
-        }
-        guard Darwin.unlink(probePath) == 0 else {
-            throw SystemPlistError.probeFailed("geod 目录测试文件无法删除（POSIX：\(errno)）")
+    private func restoreCanvasFix() throws {
+        let backupName = "Mobile-IOMobileGraphicsFamily.plist"
+        if canvas_fix_applied && systemBackupExists(named: backupName) {
+            try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: true)
+            _ = try restoreSystemFileIfBackedUp(at: TweakPaths.graphics, named: backupName)
+        } else if !canvas_fix_applied {
+            discardSystemBackup(named: backupName)
         }
     }
 
-    private func verifyRDARCreationChain() throws {
-        let probePath = "/var/Managed Preferences/mobile/.mond-rdar-probe-\(UUID().uuidString).plist"
-        defer { _ = Darwin.unlink(probePath) }
+    private func migrateLegacyRDARPreference() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: "dynamic_island_canvas_fix_migrated") else { return }
 
-        guard createMissingSystemFile(at: probePath) == 0 else {
-            throw SystemPlistError.probeFailed("测试文件创建请求失败")
-        }
-        try grantSystemPathAccessWithRetries(probePath)
-
-        let marker = Data("mond-rdar-probe".utf8)
-        try writeSystemData(marker, to: probePath)
-        guard try Data(contentsOf: URL(fileURLWithPath: probePath)) == marker else {
-            throw SystemPlistError.probeFailed("测试文件回读内容不一致")
-        }
-        guard Darwin.unlink(probePath) == 0 else {
-            throw SystemPlistError.probeFailed("测试文件无法删除（POSIX：\(errno)）")
-        }
+        canvas_fix_enabled = defaults.bool(forKey: "rdar_fix_enabled")
+        defaults.removeObject(forKey: "rdar_fix_enabled")
+        defaults.set(true, forKey: "dynamic_island_canvas_fix_migrated")
     }
 
-    private func createMissingSystemFile(at path: String) -> Int32 {
-        path.withCString { cfprefs_create_missing_file($0) }
-    }
+    private func restoreLegacyRDARFixIfNeeded() throws {
+        let defaults = UserDefaults.standard
+        let backupName = "IOMobileGraphicsFamily.plist"
+        let wasApplied = defaults.bool(forKey: "rdar_fix_applied")
 
-    private func grantSystemPathAccessWithRetries(_ path: String) throws {
-        var lastError: Error = SystemPlistError.probeFailed("等待文件创建超时")
-        for attempt in 0..<5 {
-            do {
-                try grantSystemPathAccess(path, createIfMissing: false)
-                return
-            } catch {
-                lastError = error
-                // -254 means the race did not create the file. Submit another
-                // bounded attempt instead of repeatedly checking a missing path.
-                if attempt < 4, case SystemPlistError.accessDenied(_, -254) = error {
-                    _ = createMissingSystemFile(at: path)
-                }
-            }
+        if wasApplied && systemBackupExists(named: backupName) {
+            try grantSystemPathAccess(TweakPaths.legacyGraphics, createIfMissing: true)
+            _ = try restoreSystemFileIfBackedUp(at: TweakPaths.legacyGraphics, named: backupName)
+        } else if !wasApplied {
+            discardSystemBackup(named: backupName)
         }
-        throw lastError
+
+        defaults.removeObject(forKey: "rdar_fix_applied")
+        defaults.removeObject(forKey: "rdar_fix_enabled")
     }
 
     private var persistentSelectionURL: URL {
@@ -626,16 +565,6 @@ struct ContentView: View {
                 .isEqual(to: ["value": right])
         default:
             return false
-        }
-    }
-
-    private func restoreRDARFix() throws {
-        let graphicsBackup = "IOMobileGraphicsFamily.plist"
-        if rdar_fix_applied && systemBackupExists(named: graphicsBackup) {
-            try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: true)
-            _ = try restoreSystemFileIfBackedUp(at: TweakPaths.graphics, named: graphicsBackup)
-        } else if !rdar_fix_applied {
-            discardSystemBackup(named: graphicsBackup)
         }
     }
 

@@ -7,7 +7,7 @@
 
 本仓库是 [rooootdev/mond](https://github.com/rooootdev/mond) 的简体中文版本，保留原项目作者与贡献者署名。
 
-部分 MobileGestalt 与 RDAR 分辨率修复逻辑参考了 AGPL-3.0 项目 [leminlimez/Nugget](https://github.com/leminlimez/Nugget)，并针对 mond 的端侧写入方式重新实现。缺失偏好文件的实验性创建链路基于 [0xjohnnydev/CFPrefsZeroFile-PoC](https://github.com/0xjohnnydev/CFPrefsZeroFile-PoC) 所公开的技术独立实现，并在触及 RDAR 文件前执行一次可删除的完整写入探针。
+部分 MobileGestalt 与灵动岛画布分辨率修复逻辑参考了 AGPL-3.0 项目 [leminlimez/Nugget](https://github.com/leminlimez/Nugget)，并针对 mond 的端侧写入方式重新实现。画布修复会修改 `/var/mobile/Library/Preferences/com.apple.iokit.IOMobileGraphicsFamily.plist` 中与所选灵动岛子类型匹配的 `canvas_width` 和 `canvas_height`。
 
 持久化写入采用保留原 inode、同步磁盘并回读校验的方式，参考了 MIT 许可项目 [frs0n/GestaltEdit](https://github.com/frs0n/GestaltEdit)。启用持久化模式并应用后，需要立即使用“音量上、音量下、长按侧边键”强制重启；普通关机或重新启动可能让旧缓存覆盖修改。
 
