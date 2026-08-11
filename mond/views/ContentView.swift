@@ -82,7 +82,7 @@ struct ContentView: View {
                 Section {
                     Toggle("持久化模式", isOn: $persistent_mode)
                 } footer: {
-                    Text("保存已应用的 MobileGestalt 配置；设备重启后打开 mond 时会自动校验并恢复，无需再次点击“应用修改”。普通侧载 App 无法在尚未启动时随系统开机运行。")
+                    Text("启用后会原位写入并同步 MobileGestalt。应用成功后必须立刻依次按音量上、音量下，再长按侧边键直到出现 Apple 标志；请勿使用普通关机或重新启动，否则旧缓存可能覆盖修改。")
                 }
                 
                 Section {
@@ -237,13 +237,7 @@ struct ContentView: View {
                     state.exploit_succeeded = true
                 }
                 
-                restorePersistentGestaltIfNeeded()
                 mg_load()
-            }
-            .onChange(of: persistent_mode) { _, enabled in
-                if !enabled {
-                    try? FileManager.default.removeItem(at: persistentGestaltURL)
-                }
             }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -342,23 +336,28 @@ struct ContentView: View {
 
             let systemTweakErrors = applySystemTweaks()
             try mg_write(data)
-            if persistent_mode {
-                try data.write(to: persistentGestaltURL, options: .atomic)
-            } else {
-                try? FileManager.default.removeItem(at: persistentGestaltURL)
-            }
             enable_devicename = false
             mg_load()
 
             print("(mg) successfully overwrote mobilegestalt!")
             if systemTweakErrors.isEmpty {
-                Alertinator.shared.alert(title: "修改已成功应用！", body: "请重载桌面以使修改生效。部分修改可能需要重启设备。", actionLabel: "重载桌面", action: {
-                    state.respring()
-                })
+                if persistent_mode {
+                    Alertinator.shared.alert(
+                        title: "修改已写入，请立刻强制重启！",
+                        body: "依次快速按下音量上、音量下，然后长按侧边键，直到出现 Apple 标志。请勿从设置中普通关机或重新启动。"
+                    )
+                } else {
+                    Alertinator.shared.alert(title: "修改已成功应用！", body: "请重载桌面以使修改生效。部分修改可能需要重启设备。", actionLabel: "重载桌面", action: {
+                        state.respring()
+                    })
+                }
             } else {
+                let persistenceNotice = persistent_mode
+                    ? "\n\nMobileGestalt 已原位写入；如需保留其修改，请立刻按音量上、音量下并长按侧边键强制重启。"
+                    : ""
                 Alertinator.shared.alert(
                     title: "部分修改未能应用",
-                    body: "MobileGestalt 修改已保存。\n\n\(systemTweakErrors.joined(separator: "\n\n"))"
+                    body: "MobileGestalt 修改已保存。\n\n\(systemTweakErrors.joined(separator: "\n\n"))\(persistenceNotice)"
                 )
             }
         } catch {
@@ -373,7 +372,6 @@ struct ContentView: View {
             let backup_data = try Data(contentsOf: backup_url)
             try mg_write(backup_data)
             try restoreRDARFix()
-            try? FileManager.default.removeItem(at: persistentGestaltURL)
 
             persistent_mode = false
             rdar_fix_enabled = false
@@ -545,27 +543,6 @@ struct ContentView: View {
         throw lastError
     }
 
-    private var persistentGestaltURL: URL {
-        URL(fileURLWithPath: AppPaths.backups).appendingPathComponent("PersistentGestalt.plist")
-    }
-
-    private func restorePersistentGestaltIfNeeded() {
-        guard persistent_mode,
-              let desired = try? Data(contentsOf: persistentGestaltURL) else { return }
-        do {
-            let current = try Data(contentsOf: URL(fileURLWithPath: TweakPaths.gestalt))
-            guard current != desired else { return }
-            try mg_write(desired)
-            print("(persistent) restored saved MobileGestalt configuration")
-        } catch {
-            print("(persistent) failed to restore MobileGestalt: \(error)")
-            Alertinator.shared.alert(
-                title: "持久化恢复失败",
-                body: "\(error.localizedDescription)\n请确认文件访问权限后重试。"
-            )
-        }
-    }
-
     private func restoreRDARFix() throws {
         let graphicsBackup = "IOMobileGraphicsFamily.plist"
         if rdar_fix_applied && systemBackupExists(named: graphicsBackup) {
@@ -577,17 +554,54 @@ struct ContentView: View {
     }
 
     private func mg_write(_ data: Data) throws {
-        let target_url = URL(fileURLWithPath: TweakPaths.gestalt)
-        let temp_url = target_url.deletingLastPathComponent()
-            .appendingPathComponent(".\(target_url.lastPathComponent).\(UUID().uuidString).tmp")
+        let targetURL = URL(fileURLWithPath: TweakPaths.gestalt)
+        let original = try Data(contentsOf: targetURL)
+        let descriptor = Darwin.open(
+            TweakPaths.gestalt,
+            O_WRONLY | O_CLOEXEC | O_NOFOLLOW
+        )
+        guard descriptor >= 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { Darwin.close(descriptor) }
 
-        try data.write(to: temp_url, options: [.withoutOverwriting])
-        defer { try? fm.removeItem(at: temp_url) }
+        do {
+            try overwriteOpenFile(descriptor, with: data)
+        } catch {
+            // Best-effort rollback while the original inode is still open.
+            try? overwriteOpenFile(descriptor, with: original)
+            throw error
+        }
 
-        if fm.fileExists(atPath: target_url.path) {
-            _ = try fm.replaceItemAt(target_url, withItemAt: temp_url)
-        } else {
-            try fm.moveItem(at: temp_url, to: target_url)
+        let verification = try Data(contentsOf: targetURL)
+        guard verification == data else {
+            try? overwriteOpenFile(descriptor, with: original)
+            throw CocoaError(.fileWriteUnknown)
+        }
+    }
+
+    private func overwriteOpenFile(_ descriptor: Int32, with data: Data) throws {
+        guard Darwin.ftruncate(descriptor, 0) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        try data.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else { return }
+            var written = 0
+            while written < rawBuffer.count {
+                let result = Darwin.pwrite(
+                    descriptor,
+                    base.advanced(by: written),
+                    rawBuffer.count - written,
+                    off_t(written)
+                )
+                guard result > 0 else {
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                written += result
+            }
+        }
+        guard Darwin.fsync(descriptor) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
     }
     
