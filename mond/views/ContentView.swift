@@ -443,7 +443,7 @@ struct ContentView: View {
             discardSystemBackup(named: backupName)
             return
         }
-        try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: true)
+        try prepareCanvasFileAccess(backupName: backupName)
 
         guard canvas_fix_enabled, canvasFixAvailable,
               let size = canvasSize(for: subtype) else {
@@ -479,10 +479,122 @@ struct ContentView: View {
         print("(canvas) applied \(size.width)x\(size.height) to \(TweakPaths.graphics)")
     }
 
+    private func prepareCanvasFileAccess(backupName: String) throws {
+        // If the app stopped after creating a previously missing target but
+        // before applying the canvas, remove that partial file first.
+        if !canvas_fix_applied,
+           FileManager.default.fileExists(atPath: systemMissingMarkerURL(named: backupName).path) {
+            if FileManager.default.fileExists(atPath: TweakPaths.graphics) {
+                try grantCanvasExistingPathAccess()
+            }
+            try cleanupFailedSystemCreation(at: TweakPaths.graphics, named: backupName)
+        }
+
+        if FileManager.default.fileExists(atPath: TweakPaths.graphics) {
+            try grantCanvasExistingPathAccess()
+            return
+        }
+
+        do {
+            try verifyCanvasDirectoryAccess()
+            try recordSystemFileOriginallyMissing(named: backupName)
+            return
+        } catch {
+            print("(canvas) directory access unavailable, falling back to CFPrefs: \(error)")
+        }
+
+        try verifyCanvasCreationChain()
+        try recordSystemFileOriginallyMissing(named: backupName)
+        do {
+            try createAndGrantCanvasFile(at: TweakPaths.graphics)
+        } catch {
+            // Keep the missing marker so the next run knows that any target
+            // left behind by an interrupted attempt is not an original file.
+            throw error
+        }
+    }
+
+    private func grantCanvasExistingPathAccess() throws {
+        do {
+            try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: false)
+        } catch {
+            try verifyCanvasDirectoryAccess()
+        }
+    }
+
+    private func verifyCanvasDirectoryAccess() throws {
+        let directory = (TweakPaths.graphics as NSString).deletingLastPathComponent
+        try grantSystemDirectoryAccess(directory)
+
+        let probePath = directory + "/.mond-canvas-directory-probe-\(UUID().uuidString)"
+        defer { _ = Darwin.unlink(probePath) }
+        let marker = Data("mond-canvas-directory-probe".utf8)
+        try writeSystemData(marker, to: probePath)
+
+        guard try Data(contentsOf: URL(fileURLWithPath: probePath)) == marker else {
+            throw SystemPlistError.creationFailed("目录测试文件回读内容不一致")
+        }
+        guard Darwin.unlink(probePath) == 0 else {
+            throw SystemPlistError.creationFailed("目录测试文件无法删除（POSIX：\(errno)）")
+        }
+    }
+
+    private func verifyCanvasCreationChain() throws {
+        let directory = (TweakPaths.graphics as NSString).deletingLastPathComponent
+        let probePath = directory + "/.mond-canvas-probe-\(UUID().uuidString).plist"
+        defer { _ = Darwin.unlink(probePath) }
+
+        try createAndGrantCanvasFile(at: probePath)
+        let marker = Data("mond-canvas-probe".utf8)
+        try writeSystemData(marker, to: probePath)
+
+        guard try Data(contentsOf: URL(fileURLWithPath: probePath)) == marker else {
+            throw SystemPlistError.creationFailed("测试文件回读内容不一致")
+        }
+        guard Darwin.unlink(probePath) == 0 else {
+            throw SystemPlistError.creationFailed("测试文件无法删除（POSIX：\(errno)）")
+        }
+    }
+
+    private func createAndGrantCanvasFile(at path: String) throws {
+        var lastError: Error = SystemPlistError.creationFailed("等待文件创建超时")
+
+        for _ in 0..<3 {
+            let creationResult = path.withCString { cfprefs_create_missing_file($0) }
+            guard creationResult == 0 else {
+                lastError = SystemPlistError.creationFailed("创建请求返回 \(creationResult)")
+                continue
+            }
+
+            do {
+                try grantSystemPathAccess(path, createIfMissing: false)
+                return
+            } catch {
+                lastError = error
+                // Once cfprefsd has created the target, do not submit another
+                // request that could overwrite it merely because bad_query was
+                // denied for a different reason.
+                if FileManager.default.fileExists(atPath: path) {
+                    throw error
+                }
+            }
+        }
+
+        throw lastError
+    }
+
     private func restoreCanvasFix() throws {
         let backupName = "Mobile-IOMobileGraphicsFamily.plist"
         if canvas_fix_applied && systemBackupExists(named: backupName) {
-            try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: true)
+            if FileManager.default.fileExists(atPath: TweakPaths.graphics) {
+                try grantCanvasExistingPathAccess()
+            } else if FileManager.default.fileExists(atPath: systemBackupURL(named: backupName).path) {
+                do {
+                    try verifyCanvasDirectoryAccess()
+                } catch {
+                    try createAndGrantCanvasFile(at: TweakPaths.graphics)
+                }
+            }
             _ = try restoreSystemFileIfBackedUp(at: TweakPaths.graphics, named: backupName)
         } else if !canvas_fix_applied {
             discardSystemBackup(named: backupName)

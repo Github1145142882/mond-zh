@@ -12,6 +12,7 @@ enum SystemPlistError: Error, LocalizedError {
     case accessDenied(path: String, code: Int64)
     case invalidPlist(path: String)
     case writeFailed(path: String, code: Int32)
+    case creationFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -21,11 +22,26 @@ enum SystemPlistError: Error, LocalizedError {
             return "\(path) 不是有效的属性列表"
         case let .writeFailed(path, code):
             return "写入 \(path) 失败（POSIX：\(code)）"
+        case let .creationFailed(message):
+            return "偏好文件创建失败：\(message)"
         }
     }
 }
 
 private var systemPlistSandboxHandles: [Int64] = []
+
+@discardableResult
+func grantSystemDirectoryAccess(_ path: String) throws -> Int64 {
+    var pathCString = path.utf8CString
+    let handle = pathCString.withUnsafeMutableBufferPointer { buffer in
+        bad_query_geod_directory(buffer.baseAddress)
+    }
+    guard handle >= 0 else {
+        throw SystemPlistError.accessDenied(path: path, code: handle)
+    }
+    systemPlistSandboxHandles.append(handle)
+    return handle
+}
 
 @discardableResult
 func grantSystemPathAccess(_ path: String, createIfMissing: Bool = false) throws -> Int64 {
