@@ -12,6 +12,9 @@ struct ContentView: View {
     @EnvironmentObject var state: AppState
     @AppStorage("mg_devicename") private var mg_devicename: String = ""
     @AppStorage("token") private var token: String = ""
+    @AppStorage("rdar_fix_enabled") private var rdar_fix_enabled: Bool = false
+    @AppStorage("lockscreen_footnote_enabled") private var lockscreen_footnote_enabled: Bool = false
+    @AppStorage("lockscreen_footnote") private var lockscreen_footnote: String = ""
     
     @State private var mg_dict_now: NSMutableDictionary = NSMutableDictionary()
     @State private var is_valid: Bool = false
@@ -106,8 +109,17 @@ struct ContentView: View {
                     if enable_devicename {
                         TextField("设备名称", text: $mg_devicename)
                     }
+
+                    Toggle("灵动岛状态栏／RDAR 修复", isOn: $rdar_fix_enabled)
+                        .disabled(rdarFixMode == nil)
                 } header: {
                     Label("设备外观", systemImage: "paintbrush.pointed")
+                } footer: {
+                    if rdarFixMode == nil {
+                        Text("当前机型不需要或不支持 RDAR 分辨率修复。")
+                    } else {
+                        Text("修复在非原生灵动岛机型上启用灵动岛后可能出现的状态栏错位。")
+                    }
                 }
                 
                 // basic tweak toggles
@@ -118,8 +130,22 @@ struct ContentView: View {
                     PlainToggle(text: "充电上限", minSupportedVersion: 17.0, isOn: mg_key_binding(["37NVydb//GP/GrhuTN+exg"]))
                     PlainToggle(text: "开机提示音", isOn: mg_key_binding(["QHxt+hGLaBPbQJbXiUJX3w"]))
                     PlainToggle(text: "液态玻璃低电量模式", minSupportedVersion: 19.0, isOn: mg_key_binding(["SAGvsp6O6kAQ4fEfDJpC4Q"]))
+                    PlainToggle(text: "关闭壁纸视差效果", isOn: mg_key_binding(["UIParallaxCapability"], on_val: 0))
                 } header: {
                     Label("软件功能", systemImage: "gearshape")
+                }
+
+                Section {
+                    Toggle("显示自定义文字", isOn: $lockscreen_footnote_enabled)
+
+                    if lockscreen_footnote_enabled {
+                        TextField("锁屏底部文字", text: $lockscreen_footnote, axis: .vertical)
+                            .lineLimit(1...3)
+                    }
+                } header: {
+                    Label("锁定屏幕", systemImage: "lock")
+                } footer: {
+                    Text("文字会显示在锁屏底部，应用后需要重载桌面。")
                 }
                 
                 Section {
@@ -312,17 +338,18 @@ struct ContentView: View {
             
             let data = try PropertyListSerialization.data(fromPropertyList: mg_dict_now, format: .xml, options: 0)
 
+            try applySystemTweaks()
             try mg_write(data)
             mg_dict_now = NSMutableDictionary()
             enable_devicename = false
 
             print("(mg) successfully overwrote mobilegestalt!")
-            Alertinator.shared.alert(title: "Gestalt 修改已成功应用！", body: "请重载桌面以使修改生效。部分修改可能需要重启设备。", actionLabel: "重载桌面", action: {
+            Alertinator.shared.alert(title: "修改已成功应用！", body: "请重载桌面以使修改生效。部分修改可能需要重启设备。", actionLabel: "重载桌面", action: {
                 state.respring()
             })
         } catch {
-            print("(mg) failed to apply mobilegestalt: \(error)")
-            Alertinator.shared.alert(title: "无法应用 MobileGestalt！", body: "请重新启动 App 后重试，并查看日志了解详细信息。")
+            print("(mond) failed to apply tweaks: \(error)")
+            Alertinator.shared.alert(title: "无法应用修改！", body: "\(error.localizedDescription)\n请查看日志了解详细信息。")
         }
     }
     
@@ -331,13 +358,117 @@ struct ContentView: View {
             let backup_url = URL(fileURLWithPath: AppPaths.backups).appendingPathComponent("SavedGestalt.plist")
             let backup_data = try Data(contentsOf: backup_url)
             try mg_write(backup_data)
+            try restoreAllSystemTweaks()
+
+            rdar_fix_enabled = false
+            lockscreen_footnote_enabled = false
 
             print("(mg) successfully reverted mobilegestalt!)")
-            Alertinator.shared.alert(title: "Gestalt 修改已成功还原！", body: "请重启设备以使还原生效。")
+            Alertinator.shared.alert(title: "修改已成功还原！", body: "请重启设备以使还原生效。")
         } catch {
             // The direct file write path now surfaces the underlying error through the catch.
             print("(mg) failed to revert mobilegestalt: \(error)")
-            Alertinator.shared.alert(title: "无法还原 MobileGestalt！", body: "请查看日志了解错误信息。")
+            Alertinator.shared.alert(title: "无法还原修改！", body: "\(error.localizedDescription)\n请查看日志了解错误信息。")
+        }
+    }
+
+    private enum RDARFixMode {
+        case legacyNotch
+        case modernNotch
+        case homeButton
+    }
+
+    private var rdarFixMode: RDARFixMode? {
+        switch machine_name() {
+        case "iPhone11,2", "iPhone11,4", "iPhone11,6", "iPhone11,8",
+             "iPhone12,1", "iPhone12,3", "iPhone12,5":
+            return .legacyNotch
+        case "iPhone13,2", "iPhone13,3", "iPhone13,4", "iPhone14,2",
+             "iPhone14,3", "iPhone14,5", "iPhone14,7", "iPhone14,8", "iPhone17,5":
+            return .modernNotch
+        case "iPhone12,8", "iPhone14,6":
+            return .homeButton
+        default:
+            return nil
+        }
+    }
+
+    private func rdarCanvasSize() -> (width: Int, height: Int)? {
+        guard let rdarFixMode else { return nil }
+        switch rdarFixMode {
+        case .legacyNotch:
+            return (828, 1791)
+        case .homeButton:
+            return (1000, 1779)
+        case .modernNotch:
+            switch subtype {
+            case 2556: return (1179, 2556)
+            case 2796: return (1290, 2796)
+            case 2622: return (1206, 2622)
+            case 2868: return (1320, 2868)
+            case 2736: return (1260, 2736)
+            default: return (2868, 1320)
+            }
+        }
+    }
+
+    private func applySystemTweaks() throws {
+        try applyRDARFix()
+        try applyLockScreenFootnote()
+    }
+
+    private func applyRDARFix() throws {
+        let backupName = "IOMobileGraphicsFamily.plist"
+        let backupExists = FileManager.default.fileExists(atPath: systemBackupURL(named: backupName).path)
+        guard rdar_fix_enabled || backupExists else { return }
+        try grantSystemPathAccess(TweakPaths.graphics)
+
+        guard rdar_fix_enabled else {
+            _ = try restoreSystemFileIfBackedUp(at: TweakPaths.graphics, named: backupName)
+            return
+        }
+        guard let size = rdarCanvasSize() else {
+            rdar_fix_enabled = false
+            return
+        }
+
+        try backupSystemFileIfNeeded(at: TweakPaths.graphics, named: backupName)
+        let dictionary = try loadSystemPlist(at: TweakPaths.graphics)
+        dictionary["canvas_width"] = size.width
+        dictionary["canvas_height"] = size.height
+        try writeSystemPlist(dictionary, to: TweakPaths.graphics)
+        print("(rdar) applied canvas size \(size.width)x\(size.height)")
+    }
+
+    private func applyLockScreenFootnote() throws {
+        let backupName = "SharedDeviceConfiguration.plist"
+        let backupExists = FileManager.default.fileExists(atPath: systemBackupURL(named: backupName).path)
+        guard lockscreen_footnote_enabled || backupExists else { return }
+        try grantSystemPathAccess(TweakPaths.lockScreenConfiguration)
+
+        guard lockscreen_footnote_enabled else {
+            _ = try restoreSystemFileIfBackedUp(at: TweakPaths.lockScreenConfiguration, named: backupName)
+            return
+        }
+
+        try backupSystemFileIfNeeded(at: TweakPaths.lockScreenConfiguration, named: backupName)
+        let dictionary = try loadSystemPlist(at: TweakPaths.lockScreenConfiguration)
+        dictionary["LockScreenFootnote"] = lockscreen_footnote
+        try writeSystemPlist(dictionary, to: TweakPaths.lockScreenConfiguration)
+        print("(lockscreen) applied custom footnote")
+    }
+
+    private func restoreAllSystemTweaks() throws {
+        let graphicsBackup = "IOMobileGraphicsFamily.plist"
+        if FileManager.default.fileExists(atPath: systemBackupURL(named: graphicsBackup).path) {
+            try grantSystemPathAccess(TweakPaths.graphics)
+            _ = try restoreSystemFileIfBackedUp(at: TweakPaths.graphics, named: graphicsBackup)
+        }
+
+        let footnoteBackup = "SharedDeviceConfiguration.plist"
+        if FileManager.default.fileExists(atPath: systemBackupURL(named: footnoteBackup).path) {
+            try grantSystemPathAccess(TweakPaths.lockScreenConfiguration)
+            _ = try restoreSystemFileIfBackedUp(at: TweakPaths.lockScreenConfiguration, named: footnoteBackup)
         }
     }
 

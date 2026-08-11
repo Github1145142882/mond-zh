@@ -7,6 +7,8 @@
 
 本仓库是 [rooootdev/mond](https://github.com/rooootdev/mond) 的简体中文版本，保留原项目作者与贡献者署名。
 
+部分 MobileGestalt、RDAR 分辨率修复和锁屏配置功能参考了 AGPL-3.0 项目 [leminlimez/Nugget](https://github.com/leminlimez/Nugget)，并针对 mond 的端侧写入方式重新实现。
+
 **即将推出：**<br>
 &#45; HouseArrest 文件浏览器（iOS 18 - 27？）
 
