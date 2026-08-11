@@ -1,0 +1,60 @@
+name: 构建 IPA
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 构建免签名 IPA
+    runs-on: macos-26
+    permissions:
+      contents: read
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 显示构建环境
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: 解析 Swift Package 依赖
+        run: xcodebuild -resolvePackageDependencies -project mond.xcodeproj -scheme mond
+
+      - name: 构建 App
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project mond.xcodeproj \
+            -scheme mond \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: 打包 IPA
+        run: |
+          APP_PATH=$(find "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -print -quit)
+          test -n "$APP_PATH"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/Payload/"
+          ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/Payload" "$RUNNER_TEMP/mond-unsigned.ipa"
+
+      - name: 上传 IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: mond-unsigned-ipa
+          path: ${{ runner.temp }}/mond-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
