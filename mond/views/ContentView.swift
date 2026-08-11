@@ -7,6 +7,7 @@
 
 import SwiftUI
 import PartyUI
+import Darwin
 
 struct ContentView: View {
     @EnvironmentObject var state: AppState
@@ -14,9 +15,6 @@ struct ContentView: View {
     @AppStorage("token") private var token: String = ""
     @AppStorage("rdar_fix_enabled") private var rdar_fix_enabled: Bool = false
     @AppStorage("rdar_fix_applied") private var rdar_fix_applied: Bool = false
-    @AppStorage("lockscreen_footnote_enabled") private var lockscreen_footnote_enabled: Bool = false
-    @AppStorage("lockscreen_footnote_applied") private var lockscreen_footnote_applied: Bool = false
-    @AppStorage("lockscreen_footnote") private var lockscreen_footnote: String = ""
     
     @State private var mg_dict_now: NSMutableDictionary = NSMutableDictionary()
     @State private var is_valid: Bool = false
@@ -132,22 +130,8 @@ struct ContentView: View {
                     PlainToggle(text: "充电上限", minSupportedVersion: 17.0, isOn: mg_key_binding(["37NVydb//GP/GrhuTN+exg"]))
                     PlainToggle(text: "开机提示音", isOn: mg_key_binding(["QHxt+hGLaBPbQJbXiUJX3w"]))
                     PlainToggle(text: "液态玻璃低电量模式", minSupportedVersion: 19.0, isOn: mg_key_binding(["SAGvsp6O6kAQ4fEfDJpC4Q"]))
-                    PlainToggle(text: "关闭壁纸视差效果", isOn: mg_key_binding(["UIParallaxCapability"], on_val: 0))
                 } header: {
                     Label("软件功能", systemImage: "gearshape")
-                }
-
-                Section {
-                    Toggle("显示自定义文字", isOn: $lockscreen_footnote_enabled)
-
-                    if lockscreen_footnote_enabled {
-                        TextField("锁屏底部文字", text: $lockscreen_footnote, axis: .vertical)
-                            .lineLimit(1...3)
-                    }
-                } header: {
-                    Label("锁定屏幕", systemImage: "lock")
-                } footer: {
-                    Text("文字会显示在锁屏底部，应用后需要重载桌面。")
                 }
                 
                 Section {
@@ -303,6 +287,9 @@ struct ContentView: View {
             
             // now get current gestalt values
             let cache_extra = mg_dict_now["CacheExtra"] as? NSMutableDictionary ?? NSMutableDictionary()
+            // This tweak was removed. Clear a value saved by older builds so it
+            // cannot remain active after the user applies another change.
+            cache_extra.removeObject(forKey: "UIParallaxCapability")
             
             let artwork = cache_extra["oPeik/9e8lQWMszEjbPzng"] as? NSMutableDictionary ?? NSMutableDictionary()
             
@@ -367,12 +354,10 @@ struct ContentView: View {
             let backup_url = URL(fileURLWithPath: AppPaths.backups).appendingPathComponent("SavedGestalt.plist")
             let backup_data = try Data(contentsOf: backup_url)
             try mg_write(backup_data)
-            try restoreAllSystemTweaks()
+            try restoreRDARFix()
 
             rdar_fix_enabled = false
             rdar_fix_applied = false
-            lockscreen_footnote_enabled = false
-            lockscreen_footnote_applied = false
 
             print("(mg) successfully reverted mobilegestalt!)")
             Alertinator.shared.alert(title: "修改已成功还原！", body: "请重启设备以使还原生效。")
@@ -433,13 +418,6 @@ struct ContentView: View {
             print("(rdar) failed: \(error)")
         }
 
-        do {
-            try applyLockScreenFootnote()
-        } catch {
-            errors.append("锁屏文字：\(error.localizedDescription)")
-            print("(lockscreen) failed: \(error)")
-        }
-
         return errors
     }
 
@@ -449,9 +427,8 @@ struct ContentView: View {
             discardSystemBackup(named: backupName)
             return
         }
-        try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: true)
-
         guard rdar_fix_enabled else {
+            try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: true)
             _ = try restoreSystemFileIfBackedUp(at: TweakPaths.graphics, named: backupName)
             rdar_fix_applied = false
             return
@@ -461,10 +438,7 @@ struct ContentView: View {
             return
         }
 
-        if !rdar_fix_applied {
-            try cleanupFailedSystemCreation(at: TweakPaths.graphics, named: backupName)
-        }
-        try backupSystemFileIfNeeded(at: TweakPaths.graphics, named: backupName)
+        try prepareRDARFileAccess(backupName: backupName)
         let dictionary = try loadSystemPlist(at: TweakPaths.graphics)
         dictionary["canvas_width"] = size.width
         dictionary["canvas_height"] = size.height
@@ -473,46 +447,87 @@ struct ContentView: View {
         print("(rdar) applied canvas size \(size.width)x\(size.height)")
     }
 
-    private func applyLockScreenFootnote() throws {
-        let backupName = "SharedDeviceConfiguration.plist"
-        guard lockscreen_footnote_enabled || lockscreen_footnote_applied else {
+    private func prepareRDARFileAccess(backupName: String) throws {
+        // A previous interrupted attempt may have created the target but not
+        // finished writing it. Keep the marker until we can safely remove that
+        // partial file; never silently treat it as an original system file.
+        if !rdar_fix_applied,
+           FileManager.default.fileExists(atPath: systemMissingMarkerURL(named: backupName).path) {
+            try grantSystemPathAccessWithRetries(TweakPaths.graphics)
+            try cleanupFailedSystemCreation(at: TweakPaths.graphics, named: backupName)
+        }
+
+        do {
+            try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: false)
+            try backupSystemFileIfNeeded(at: TweakPaths.graphics, named: backupName)
+            return
+        } catch {
+            if FileManager.default.fileExists(atPath: TweakPaths.graphics) {
+                throw error
+            }
+        }
+
+        // Never aim the creation primitive at the real preference until a
+        // disposable file has passed creation, bad_query access, write,
+        // read-back and deletion checks on this exact device.
+        try verifyRDARCreationChain()
+        try recordSystemFileOriginallyMissing(named: backupName)
+
+        guard createMissingSystemFile(at: TweakPaths.graphics) == 0 else {
             discardSystemBackup(named: backupName)
-            return
+            throw SystemPlistError.probeFailed("无法提交目标文件创建请求")
         }
-        try grantSystemPathAccess(TweakPaths.lockScreenConfiguration, createIfMissing: true)
-
-        guard lockscreen_footnote_enabled else {
-            _ = try restoreSystemFileIfBackedUp(at: TweakPaths.lockScreenConfiguration, named: backupName)
-            lockscreen_footnote_applied = false
-            return
+        do {
+            try grantSystemPathAccessWithRetries(TweakPaths.graphics)
+        } catch {
+            throw error
         }
-
-        if !lockscreen_footnote_applied {
-            try cleanupFailedSystemCreation(at: TweakPaths.lockScreenConfiguration, named: backupName)
-        }
-        try backupSystemFileIfNeeded(at: TweakPaths.lockScreenConfiguration, named: backupName)
-        let dictionary = try loadSystemPlist(at: TweakPaths.lockScreenConfiguration)
-        dictionary["LockScreenFootnote"] = lockscreen_footnote
-        try writeSystemPlist(dictionary, to: TweakPaths.lockScreenConfiguration)
-        lockscreen_footnote_applied = true
-        print("(lockscreen) applied custom footnote")
     }
 
-    private func restoreAllSystemTweaks() throws {
+    private func verifyRDARCreationChain() throws {
+        let probePath = "/var/Managed Preferences/mobile/.mond-rdar-probe-\(UUID().uuidString).plist"
+        defer { _ = Darwin.unlink(probePath) }
+
+        guard createMissingSystemFile(at: probePath) == 0 else {
+            throw SystemPlistError.probeFailed("测试文件创建请求失败")
+        }
+        try grantSystemPathAccessWithRetries(probePath)
+
+        let marker = Data("mond-rdar-probe".utf8)
+        try writeSystemData(marker, to: probePath)
+        guard try Data(contentsOf: URL(fileURLWithPath: probePath)) == marker else {
+            throw SystemPlistError.probeFailed("测试文件回读内容不一致")
+        }
+        guard Darwin.unlink(probePath) == 0 else {
+            throw SystemPlistError.probeFailed("测试文件无法删除（POSIX：\(errno)）")
+        }
+    }
+
+    private func createMissingSystemFile(at path: String) -> Int32 {
+        path.withCString { cfprefs_create_missing_file($0) }
+    }
+
+    private func grantSystemPathAccessWithRetries(_ path: String) throws {
+        var lastError: Error = SystemPlistError.probeFailed("等待文件创建超时")
+        for _ in 0..<15 {
+            do {
+                try grantSystemPathAccess(path, createIfMissing: false)
+                return
+            } catch {
+                lastError = error
+                usleep(100_000)
+            }
+        }
+        throw lastError
+    }
+
+    private func restoreRDARFix() throws {
         let graphicsBackup = "IOMobileGraphicsFamily.plist"
         if rdar_fix_applied && systemBackupExists(named: graphicsBackup) {
             try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: true)
             _ = try restoreSystemFileIfBackedUp(at: TweakPaths.graphics, named: graphicsBackup)
         } else if !rdar_fix_applied {
             discardSystemBackup(named: graphicsBackup)
-        }
-
-        let footnoteBackup = "SharedDeviceConfiguration.plist"
-        if lockscreen_footnote_applied && systemBackupExists(named: footnoteBackup) {
-            try grantSystemPathAccess(TweakPaths.lockScreenConfiguration, createIfMissing: true)
-            _ = try restoreSystemFileIfBackedUp(at: TweakPaths.lockScreenConfiguration, named: footnoteBackup)
-        } else if !lockscreen_footnote_applied {
-            discardSystemBackup(named: footnoteBackup)
         }
     }
 

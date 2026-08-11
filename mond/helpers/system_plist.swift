@@ -12,6 +12,7 @@ enum SystemPlistError: Error, LocalizedError {
     case accessDenied(path: String, code: Int64)
     case invalidPlist(path: String)
     case writeFailed(path: String, code: Int32)
+    case probeFailed(String)
 
     var errorDescription: String? {
         switch self {
@@ -21,6 +22,8 @@ enum SystemPlistError: Error, LocalizedError {
             return "\(path) 不是有效的属性列表"
         case let .writeFailed(path, code):
             return "写入 \(path) 失败（POSIX：\(code)）"
+        case let .probeFailed(message):
+            return "RDAR 写入探针失败：\(message)"
         }
     }
 }
@@ -62,6 +65,14 @@ func systemBackupURL(named name: String) -> URL {
 
 func systemMissingMarkerURL(named name: String) -> URL {
     URL(fileURLWithPath: AppPaths.backups).appendingPathComponent("\(name).originally-missing")
+}
+
+func recordSystemFileOriginallyMissing(named name: String) throws {
+    discardSystemBackup(named: name)
+    try Data().write(
+        to: systemMissingMarkerURL(named: name),
+        options: [.withoutOverwriting]
+    )
 }
 
 func systemBackupExists(named name: String) -> Bool {

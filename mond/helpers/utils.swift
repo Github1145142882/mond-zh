@@ -58,5 +58,4 @@ enum TweakPaths {
     static var gestalt = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist"
     static var gestalt_dir = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/"
     static var graphics = "/var/Managed Preferences/mobile/com.apple.iokit.IOMobileGraphicsFamily.plist"
-    static var lockScreenConfiguration = "/var/containers/Shared/SystemGroup/systemgroup.com.apple.configurationprofiles/Library/ConfigurationProfiles/SharedDeviceConfiguration.plist"
 }
