@@ -30,9 +30,14 @@ func is_supported() -> Bool {
 }
 
 func hasHomeButton() -> Bool {
-    let sel = NSSelectorFromString("_hasHomeButton")
-    return UIDevice.responds(to: sel) &&
-        (UIDevice.perform(sel)?.takeUnretainedValue() as? Bool ?? false)
+    let windows = UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .flatMap { $0.windows }
+
+    guard let bottomInset = windows.first(where: { $0.isKeyWindow })?.safeAreaInsets.bottom else {
+        return false
+    }
+    return bottomInset == 0
 }
 
 enum AppPaths {
@@ -52,6 +57,6 @@ enum AppPaths {
 enum TweakPaths {
     static var gestalt = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist"
     static var gestalt_dir = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/"
-    static var graphics = "/private/var/Managed Preferences/mobile/com.apple.iokit.IOMobileGraphicsFamily.plist"
-    static var lockScreenConfiguration = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.configurationprofiles/Library/ConfigurationProfiles/SharedDeviceConfiguration.plist"
+    static var graphics = "/var/Managed Preferences/mobile/com.apple.iokit.IOMobileGraphicsFamily.plist"
+    static var lockScreenConfiguration = "/var/containers/Shared/SystemGroup/systemgroup.com.apple.configurationprofiles/Library/ConfigurationProfiles/SharedDeviceConfiguration.plist"
 }

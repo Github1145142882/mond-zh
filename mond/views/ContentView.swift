@@ -342,8 +342,8 @@ struct ContentView: View {
 
             let systemTweakErrors = applySystemTweaks()
             try mg_write(data)
-            mg_dict_now = NSMutableDictionary()
             enable_devicename = false
+            mg_load()
 
             print("(mg) successfully overwrote mobilegestalt!")
             if systemTweakErrors.isEmpty {
@@ -429,7 +429,6 @@ struct ContentView: View {
         do {
             try applyRDARFix()
         } catch {
-            rdar_fix_enabled = false
             errors.append("RDAR 修复：\(error.localizedDescription)")
             print("(rdar) failed: \(error)")
         }
@@ -437,7 +436,6 @@ struct ContentView: View {
         do {
             try applyLockScreenFootnote()
         } catch {
-            lockscreen_footnote_enabled = false
             errors.append("锁屏文字：\(error.localizedDescription)")
             print("(lockscreen) failed: \(error)")
         }

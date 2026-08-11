@@ -9,8 +9,12 @@
 
 部分 MobileGestalt、RDAR 分辨率修复和锁屏配置功能参考了 AGPL-3.0 项目 [leminlimez/Nugget](https://github.com/leminlimez/Nugget)，并针对 mond 的端侧写入方式重新实现。
 
-**即将推出：**<br>
+**计划推出：**<br>
 &#45; HouseArrest 文件浏览器（iOS 18 - 27？）
+
+**已知问题：**<br>
+&#45; 修改可能会在设备重启后消失<br>
+&#45; Apple 智能激活目前不可用
 
 **致谢：**<br>
 &#45; [forcequit](https://github.com/forcequitOS)：bad_query 相关工作<br>
