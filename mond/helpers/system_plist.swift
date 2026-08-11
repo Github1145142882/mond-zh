@@ -6,11 +6,12 @@
 //
 
 import Foundation
+import Darwin
 
 enum SystemPlistError: Error, LocalizedError {
     case accessDenied(path: String, code: Int64)
     case invalidPlist(path: String)
-    case missingBackup(String)
+    case writeFailed(path: String, code: Int32)
 
     var errorDescription: String? {
         switch self {
@@ -18,8 +19,8 @@ enum SystemPlistError: Error, LocalizedError {
             return "无法访问 \(path)（错误代码：\(code)）"
         case let .invalidPlist(path):
             return "\(path) 不是有效的属性列表"
-        case let .missingBackup(name):
-            return "找不到备份：\(name)"
+        case let .writeFailed(path, code):
+            return "写入 \(path) 失败（POSIX：\(code)）"
         }
     }
 }
@@ -27,27 +28,23 @@ enum SystemPlistError: Error, LocalizedError {
 private var systemPlistSandboxHandles: [Int64] = []
 
 @discardableResult
-func grantSystemPathAccess(_ path: String) throws -> Int64 {
-    let accessPath: String
-    var isDirectory: ObjCBool = false
-    if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue {
-        accessPath = path
-    } else {
-        accessPath = URL(fileURLWithPath: path).deletingLastPathComponent().path
-    }
-
-    var pathCString = accessPath.utf8CString
+func grantSystemPathAccess(_ path: String, createIfMissing: Bool = false) throws -> Int64 {
+    let exists = FileManager.default.fileExists(atPath: path)
+    var pathCString = path.utf8CString
     let handle = pathCString.withUnsafeMutableBufferPointer { buffer in
-        bad_query(buffer.baseAddress, false, nil, false)
+        bad_query(buffer.baseAddress, createIfMissing && !exists, nil, false)
     }
     guard handle >= 0 else {
-        throw SystemPlistError.accessDenied(path: accessPath, code: handle)
+        throw SystemPlistError.accessDenied(path: path, code: handle)
     }
     systemPlistSandboxHandles.append(handle)
     return handle
 }
 
 func loadSystemPlist(at path: String) throws -> NSMutableDictionary {
+    guard FileManager.default.fileExists(atPath: path) else {
+        return NSMutableDictionary()
+    }
     let data = try Data(contentsOf: URL(fileURLWithPath: path))
     guard let dictionary = try PropertyListSerialization.propertyList(
         from: data,
@@ -63,10 +60,25 @@ func systemBackupURL(named name: String) -> URL {
     URL(fileURLWithPath: AppPaths.backups).appendingPathComponent(name)
 }
 
+func systemMissingMarkerURL(named name: String) -> URL {
+    URL(fileURLWithPath: AppPaths.backups).appendingPathComponent("\(name).originally-missing")
+}
+
+func systemBackupExists(named name: String) -> Bool {
+    FileManager.default.fileExists(atPath: systemBackupURL(named: name).path) ||
+        FileManager.default.fileExists(atPath: systemMissingMarkerURL(named: name).path)
+}
+
 func backupSystemFileIfNeeded(at path: String, named backupName: String) throws {
     let backupURL = systemBackupURL(named: backupName)
-    guard !FileManager.default.fileExists(atPath: backupURL.path) else { return }
-    try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: backupURL)
+    let missingMarkerURL = systemMissingMarkerURL(named: backupName)
+    guard !systemBackupExists(named: backupName) else { return }
+
+    if FileManager.default.fileExists(atPath: path) {
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: backupURL)
+    } else {
+        try Data().write(to: missingMarkerURL, options: [.withoutOverwriting])
+    }
 }
 
 func writeSystemPlist(_ dictionary: NSDictionary, to path: String) throws {
@@ -79,18 +91,51 @@ func writeSystemPlist(_ dictionary: NSDictionary, to path: String) throws {
 }
 
 func writeSystemData(_ data: Data, to path: String) throws {
-    let targetURL = URL(fileURLWithPath: path)
-    let temporaryURL = targetURL.deletingLastPathComponent()
-        .appendingPathComponent(".\(targetURL.lastPathComponent).\(UUID().uuidString).tmp")
+    let exists = FileManager.default.fileExists(atPath: path)
+    let flags = O_WRONLY | O_CLOEXEC | O_NOFOLLOW | (exists ? 0 : O_CREAT | O_EXCL)
+    let descriptor = Darwin.open(path, flags, mode_t(0o600))
+    guard descriptor >= 0 else {
+        throw SystemPlistError.writeFailed(path: path, code: errno)
+    }
+    defer { Darwin.close(descriptor) }
 
-    try data.write(to: temporaryURL, options: [.withoutOverwriting])
-    defer { try? FileManager.default.removeItem(at: temporaryURL) }
+    try data.withUnsafeBytes { rawBuffer in
+        guard let baseAddress = rawBuffer.baseAddress else { return }
+        var totalWritten = 0
+        while totalWritten < rawBuffer.count {
+            let result = Darwin.pwrite(
+                descriptor,
+                baseAddress.advanced(by: totalWritten),
+                rawBuffer.count - totalWritten,
+                off_t(totalWritten)
+            )
+            guard result > 0 else {
+                throw SystemPlistError.writeFailed(path: path, code: errno)
+            }
+            totalWritten += result
+        }
+    }
 
-    _ = try FileManager.default.replaceItemAt(targetURL, withItemAt: temporaryURL)
+    guard Darwin.ftruncate(descriptor, off_t(data.count)) == 0 else {
+        throw SystemPlistError.writeFailed(path: path, code: errno)
+    }
+    guard Darwin.fsync(descriptor) == 0 else {
+        throw SystemPlistError.writeFailed(path: path, code: errno)
+    }
 }
 
 func restoreSystemFileIfBackedUp(at path: String, named backupName: String) throws -> Bool {
     let backupURL = systemBackupURL(named: backupName)
+    let missingMarkerURL = systemMissingMarkerURL(named: backupName)
+
+    if FileManager.default.fileExists(atPath: missingMarkerURL.path) {
+        if FileManager.default.fileExists(atPath: path) {
+            try FileManager.default.removeItem(atPath: path)
+        }
+        try FileManager.default.removeItem(at: missingMarkerURL)
+        return true
+    }
+
     guard FileManager.default.fileExists(atPath: backupURL.path) else { return false }
 
     let data = try Data(contentsOf: backupURL)

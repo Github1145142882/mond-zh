@@ -419,7 +419,7 @@ struct ContentView: View {
 
     private func applyRDARFix() throws {
         let backupName = "IOMobileGraphicsFamily.plist"
-        let backupExists = FileManager.default.fileExists(atPath: systemBackupURL(named: backupName).path)
+        let backupExists = systemBackupExists(named: backupName)
         guard rdar_fix_enabled || backupExists else { return }
         try grantSystemPathAccess(TweakPaths.graphics)
 
@@ -442,9 +442,9 @@ struct ContentView: View {
 
     private func applyLockScreenFootnote() throws {
         let backupName = "SharedDeviceConfiguration.plist"
-        let backupExists = FileManager.default.fileExists(atPath: systemBackupURL(named: backupName).path)
+        let backupExists = systemBackupExists(named: backupName)
         guard lockscreen_footnote_enabled || backupExists else { return }
-        try grantSystemPathAccess(TweakPaths.lockScreenConfiguration)
+        try grantSystemPathAccess(TweakPaths.lockScreenConfiguration, createIfMissing: true)
 
         guard lockscreen_footnote_enabled else {
             _ = try restoreSystemFileIfBackedUp(at: TweakPaths.lockScreenConfiguration, named: backupName)
@@ -460,14 +460,14 @@ struct ContentView: View {
 
     private func restoreAllSystemTweaks() throws {
         let graphicsBackup = "IOMobileGraphicsFamily.plist"
-        if FileManager.default.fileExists(atPath: systemBackupURL(named: graphicsBackup).path) {
+        if systemBackupExists(named: graphicsBackup) {
             try grantSystemPathAccess(TweakPaths.graphics)
             _ = try restoreSystemFileIfBackedUp(at: TweakPaths.graphics, named: graphicsBackup)
         }
 
         let footnoteBackup = "SharedDeviceConfiguration.plist"
-        if FileManager.default.fileExists(atPath: systemBackupURL(named: footnoteBackup).path) {
-            try grantSystemPathAccess(TweakPaths.lockScreenConfiguration)
+        if systemBackupExists(named: footnoteBackup) {
+            try grantSystemPathAccess(TweakPaths.lockScreenConfiguration, createIfMissing: true)
             _ = try restoreSystemFileIfBackedUp(at: TweakPaths.lockScreenConfiguration, named: footnoteBackup)
         }
     }
