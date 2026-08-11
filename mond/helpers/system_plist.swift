@@ -69,6 +69,21 @@ func systemBackupExists(named name: String) -> Bool {
         FileManager.default.fileExists(atPath: systemMissingMarkerURL(named: name).path)
 }
 
+func discardSystemBackup(named name: String) {
+    try? FileManager.default.removeItem(at: systemBackupURL(named: name))
+    try? FileManager.default.removeItem(at: systemMissingMarkerURL(named: name))
+}
+
+func cleanupFailedSystemCreation(at path: String, named backupName: String) throws {
+    let markerURL = systemMissingMarkerURL(named: backupName)
+    guard FileManager.default.fileExists(atPath: markerURL.path) else { return }
+
+    if Darwin.unlink(path) != 0 && errno != ENOENT {
+        throw SystemPlistError.writeFailed(path: path, code: errno)
+    }
+    try FileManager.default.removeItem(at: markerURL)
+}
+
 func backupSystemFileIfNeeded(at path: String, named backupName: String) throws {
     let backupURL = systemBackupURL(named: backupName)
     let missingMarkerURL = systemMissingMarkerURL(named: backupName)

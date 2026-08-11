@@ -13,7 +13,9 @@ struct ContentView: View {
     @AppStorage("mg_devicename") private var mg_devicename: String = ""
     @AppStorage("token") private var token: String = ""
     @AppStorage("rdar_fix_enabled") private var rdar_fix_enabled: Bool = false
+    @AppStorage("rdar_fix_applied") private var rdar_fix_applied: Bool = false
     @AppStorage("lockscreen_footnote_enabled") private var lockscreen_footnote_enabled: Bool = false
+    @AppStorage("lockscreen_footnote_applied") private var lockscreen_footnote_applied: Bool = false
     @AppStorage("lockscreen_footnote") private var lockscreen_footnote: String = ""
     
     @State private var mg_dict_now: NSMutableDictionary = NSMutableDictionary()
@@ -338,15 +340,22 @@ struct ContentView: View {
             
             let data = try PropertyListSerialization.data(fromPropertyList: mg_dict_now, format: .xml, options: 0)
 
-            try applySystemTweaks()
+            let systemTweakErrors = applySystemTweaks()
             try mg_write(data)
             mg_dict_now = NSMutableDictionary()
             enable_devicename = false
 
             print("(mg) successfully overwrote mobilegestalt!")
-            Alertinator.shared.alert(title: "修改已成功应用！", body: "请重载桌面以使修改生效。部分修改可能需要重启设备。", actionLabel: "重载桌面", action: {
-                state.respring()
-            })
+            if systemTweakErrors.isEmpty {
+                Alertinator.shared.alert(title: "修改已成功应用！", body: "请重载桌面以使修改生效。部分修改可能需要重启设备。", actionLabel: "重载桌面", action: {
+                    state.respring()
+                })
+            } else {
+                Alertinator.shared.alert(
+                    title: "部分修改未能应用",
+                    body: "MobileGestalt 修改已保存。\n\n\(systemTweakErrors.joined(separator: "\n\n"))"
+                )
+            }
         } catch {
             print("(mond) failed to apply tweaks: \(error)")
             Alertinator.shared.alert(title: "无法应用修改！", body: "\(error.localizedDescription)\n请查看日志了解详细信息。")
@@ -361,7 +370,9 @@ struct ContentView: View {
             try restoreAllSystemTweaks()
 
             rdar_fix_enabled = false
+            rdar_fix_applied = false
             lockscreen_footnote_enabled = false
+            lockscreen_footnote_applied = false
 
             print("(mg) successfully reverted mobilegestalt!)")
             Alertinator.shared.alert(title: "修改已成功还原！", body: "请重启设备以使还原生效。")
@@ -412,19 +423,39 @@ struct ContentView: View {
         }
     }
 
-    private func applySystemTweaks() throws {
-        try applyRDARFix()
-        try applyLockScreenFootnote()
+    private func applySystemTweaks() -> [String] {
+        var errors: [String] = []
+
+        do {
+            try applyRDARFix()
+        } catch {
+            rdar_fix_enabled = false
+            errors.append("RDAR 修复：\(error.localizedDescription)")
+            print("(rdar) failed: \(error)")
+        }
+
+        do {
+            try applyLockScreenFootnote()
+        } catch {
+            lockscreen_footnote_enabled = false
+            errors.append("锁屏文字：\(error.localizedDescription)")
+            print("(lockscreen) failed: \(error)")
+        }
+
+        return errors
     }
 
     private func applyRDARFix() throws {
         let backupName = "IOMobileGraphicsFamily.plist"
-        let backupExists = systemBackupExists(named: backupName)
-        guard rdar_fix_enabled || backupExists else { return }
-        try grantSystemPathAccess(TweakPaths.graphics)
+        guard rdar_fix_enabled || rdar_fix_applied else {
+            discardSystemBackup(named: backupName)
+            return
+        }
+        try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: true)
 
         guard rdar_fix_enabled else {
             _ = try restoreSystemFileIfBackedUp(at: TweakPaths.graphics, named: backupName)
+            rdar_fix_applied = false
             return
         }
         guard let size = rdarCanvasSize() else {
@@ -432,43 +463,58 @@ struct ContentView: View {
             return
         }
 
+        if !rdar_fix_applied {
+            try cleanupFailedSystemCreation(at: TweakPaths.graphics, named: backupName)
+        }
         try backupSystemFileIfNeeded(at: TweakPaths.graphics, named: backupName)
         let dictionary = try loadSystemPlist(at: TweakPaths.graphics)
         dictionary["canvas_width"] = size.width
         dictionary["canvas_height"] = size.height
         try writeSystemPlist(dictionary, to: TweakPaths.graphics)
+        rdar_fix_applied = true
         print("(rdar) applied canvas size \(size.width)x\(size.height)")
     }
 
     private func applyLockScreenFootnote() throws {
         let backupName = "SharedDeviceConfiguration.plist"
-        let backupExists = systemBackupExists(named: backupName)
-        guard lockscreen_footnote_enabled || backupExists else { return }
+        guard lockscreen_footnote_enabled || lockscreen_footnote_applied else {
+            discardSystemBackup(named: backupName)
+            return
+        }
         try grantSystemPathAccess(TweakPaths.lockScreenConfiguration, createIfMissing: true)
 
         guard lockscreen_footnote_enabled else {
             _ = try restoreSystemFileIfBackedUp(at: TweakPaths.lockScreenConfiguration, named: backupName)
+            lockscreen_footnote_applied = false
             return
         }
 
+        if !lockscreen_footnote_applied {
+            try cleanupFailedSystemCreation(at: TweakPaths.lockScreenConfiguration, named: backupName)
+        }
         try backupSystemFileIfNeeded(at: TweakPaths.lockScreenConfiguration, named: backupName)
         let dictionary = try loadSystemPlist(at: TweakPaths.lockScreenConfiguration)
         dictionary["LockScreenFootnote"] = lockscreen_footnote
         try writeSystemPlist(dictionary, to: TweakPaths.lockScreenConfiguration)
+        lockscreen_footnote_applied = true
         print("(lockscreen) applied custom footnote")
     }
 
     private func restoreAllSystemTweaks() throws {
         let graphicsBackup = "IOMobileGraphicsFamily.plist"
-        if systemBackupExists(named: graphicsBackup) {
-            try grantSystemPathAccess(TweakPaths.graphics)
+        if rdar_fix_applied && systemBackupExists(named: graphicsBackup) {
+            try grantSystemPathAccess(TweakPaths.graphics, createIfMissing: true)
             _ = try restoreSystemFileIfBackedUp(at: TweakPaths.graphics, named: graphicsBackup)
+        } else if !rdar_fix_applied {
+            discardSystemBackup(named: graphicsBackup)
         }
 
         let footnoteBackup = "SharedDeviceConfiguration.plist"
-        if systemBackupExists(named: footnoteBackup) {
+        if lockscreen_footnote_applied && systemBackupExists(named: footnoteBackup) {
             try grantSystemPathAccess(TweakPaths.lockScreenConfiguration, createIfMissing: true)
             _ = try restoreSystemFileIfBackedUp(at: TweakPaths.lockScreenConfiguration, named: footnoteBackup)
+        } else if !lockscreen_footnote_applied {
+            discardSystemBackup(named: footnoteBackup)
         }
     }
 
