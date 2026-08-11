@@ -14,6 +14,7 @@
 &#45; [forcequit](https://github.com/forcequitOS)：bad_query 相关工作<br>
 &#45; [johnny](https://github.com/0xjohnnydev)：MCM 漏洞类相关工作<br>
 &#45; [jailbreak.party](https://github.com/jailbreakdotparty)：PartyUI 与 GestaltView<br>
+&#45; [稽品飞车](https://github.com/Github1145142882)：简体中文汉化<br>
 
 ## 下载与构建
 

@@ -150,6 +150,12 @@ struct SettingsView: View {
                     CreditsRow(name: "forcequit", role: "bad_query 漏洞利用", profile: URL(string: "https://github.com/forcequitOS")!)
                     CreditsRow(name: "johnny", role: "MCM 漏洞类相关工作", profile: URL(string: "https://github.com/0xjohnnydev")!)
                     CreditsRow(name: "jailbreak.party", role: "PartyUI, GestaltView", profile: URL(string: "https://github.com/jailbreakdotparty")!)
+                    CreditsRow(
+                        name: "稽品飞车",
+                        role: "简体中文汉化",
+                        profile: URL(string: "https://github.com/Github1145142882")!,
+                        assetName: "JipinfeicheAvatar"
+                    )
                 } header: {
                     Label("致谢", systemImage: "person.3.fill")
                 }
@@ -185,13 +191,19 @@ struct CreditsRow: View {
     let name: String
     let role: String
     let profile: URL
+    var assetName: String? = nil
 
     private var pfp: URL? {
         URL(string: profile.absoluteString + ".png")
     }
 
-    var body: some View {
-        HStack(alignment: .top) {
+    @ViewBuilder
+    private var avatar: some View {
+        if let assetName {
+            Image(assetName)
+                .resizable()
+                .scaledToFill()
+        } else {
             AsyncImage(url: pfp) { image in
                 image
                     .resizable()
@@ -199,6 +211,12 @@ struct CreditsRow: View {
             } placeholder: {
                 ProgressView()
             }
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top) {
+            avatar
             .frame(width: 40, height: 40)
             .clipShape(Circle())
 
